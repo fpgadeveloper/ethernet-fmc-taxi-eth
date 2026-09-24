@@ -6,7 +6,27 @@ AXI Ethernet Subsystem of our other Ethernet FMC designs is not used, so the des
 separately-licensed AMD IP** (no Tri-Mode Ethernet MAC license), and the complete source of the
 MAC is in the repository for you to read, simulate and modify.
 
-<!-- TODO: block diagram for the Taxi design (images/taxi-eth-block-diagram.png) -->
+## Block diagram
+
+![Taxi Ethernet design block diagram](images/taxi-eth-block-diagram.png)
+
+Reading a port row from left to right:
+
+* **AXI DMA.** One scatter-gather AXI DMA per port carries frames between system memory and
+  the MAC on a 32-bit AXI4-Stream (MM2S transmits, S2MM receives). Its three AXI masters
+  (scatter-gather, MM2S, S2MM) reach DDR through `S_AXI_HP0_FPD` on the Zynq UltraScale+
+  targets, or through the DDR4 memory controller on the MicroBlaze targets.
+* **`taxi_rgmii_mac_N`.** The block-design module reference that bundles the Taxi 1G RGMII MAC
+  (`taxi_eth_mac_1g_rgmii_fifo`) with its 8 kB transmit and receive frame FIFOs, a Taxi MDIO
+  master for the port's PHY and an AXI4-Lite register file — described in detail below.
+* **RGMII I/O.** The wire side of the MAC is RGMII: 4-bit DDR data at 125 MHz, driven by ODDR
+  primitives on transmit and captured by IDDR primitives on receive, each receive pin passing
+  through an IDELAYE3 whose delay is tuned per port and calibrated by an IDELAYCTRL.
+* **Clocking.** An MMCM derives `gtx_clk` (125 MHz), `gtx_clk90` (the 90-degree copy used as the
+  RGMII transmit clock) and the 300 MHz IDELAYCTRL reference from the 125 MHz clock that the
+  Ethernet FMC's clock generator supplies through the FMC connector.
+* **The PHYs.** Each port ends on the mezzanine card in a Marvell 88E1510 PHY and its RJ45
+  connector, managed over that port's own MDIO bus.
 
 The block design (`Vivado/src/bd/bd_zynqmp.tcl`) is built from:
 

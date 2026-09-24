@@ -36,7 +36,7 @@ Common to both:
 The MicroBlaze targets are standalone-only: the design has no boot device, so the bitstream and
 the echo server ELF are loaded over JTAG (see the docs), and there is no Linux flow for them.
 
-<!-- TODO: block diagram for the Taxi design (docs/source/images/) -->
+![Taxi Ethernet design block diagram](docs/source/images/taxi-eth-block-diagram.png "Taxi Ethernet design block diagram")
 
 Important links:
 
