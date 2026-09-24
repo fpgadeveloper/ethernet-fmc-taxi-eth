@@ -1,0 +1,216 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026, Opsero Electronic Design Inc.  All rights reserved.
+# ---------------------------------------------------------------------------
+# taxi-eth-test : Ethernet FMC Taxi MAC port self-test
+#
+# Opsero ethernet-fmc-taxi-eth reference design (Ethernet FMC, 4x Marvell
+# 88E1510 RGMII PHYs, each port a Taxi RGMII MAC + AXI DMA driven by the
+# taxi_mac Linux driver).
+#
+# Bench fixture: Ethernet FMC port 0 cabled to the LAN router (DHCP server),
+# ports 1-3 may be left unconnected. Boot Linux and run this script as root.
+# It finds the FMC ports (the netdevs bound to the taxi_mac driver), brings
+# them up and, for each port:
+#
+#   1. reports link state, negotiated speed/duplex (ethtool) and the MAC;
+#   2. on every port with carrier: waits for a DHCP lease (systemd-networkd
+#      handles DHCP on all wired ports in the EDF image; dhcpcd/udhcpc are
+#      used as a fallback when present), then pings the port's default
+#      gateway 5 times and requires at least 4 replies;
+#   3. prints the driver's ethtool -S counters.
+#
+# VERDICT: PASS (exit 0) if at least one Taxi port has carrier + DHCP lease +
+# a ping reply rate >= 4/5; otherwise VERDICT: FAIL (exit 1). With
+# --all-ports, every one of the four ports must additionally have carrier.
+#
+# Usage:  taxi-eth-test [options] [iface ...]
+#   -w SECS        wait for the ports / link-up timeout     (default: 20)
+#   -d SECS        DHCP lease timeout per port               (default: 15)
+#   -n COUNT       ping count per port                       (default: 5)
+#   --all-ports    require carrier on all four Taxi ports
+#   iface ...      override auto-detection of the Taxi interfaces
+# ---------------------------------------------------------------------------
+
+LINK_WAIT=20
+DHCP_WAIT=15
+PING_COUNT=5
+ALL_PORTS=0
+EXPECTED_PORTS=4
+IFACES=""
+
+usage() { sed -n '5,32p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-w) LINK_WAIT="$2"; shift 2 ;;
+		-d) DHCP_WAIT="$2"; shift 2 ;;
+		-n) PING_COUNT="$2"; shift 2 ;;
+		--all-ports) ALL_PORTS=1; shift ;;
+		-h|--help) usage ;;
+		-*) echo "unknown option: $1"; usage ;;
+		*)  IFACES="$IFACES $1"; shift ;;
+	esac
+done
+
+[ "$(id -u)" = "0" ] || { echo "ERROR: must be run as root"; exit 1; }
+
+PING_MIN=$(( PING_COUNT - 1 ))
+[ "$PING_MIN" -lt 1 ] && PING_MIN=1
+
+log()  { printf '%s\n' "$*"; }
+hdr()  { printf '\n=== %s ===\n' "$*"; }
+
+# --------------------------------------------------------------------------
+# Taxi interface discovery: the FMC ports are the netdevs whose platform
+# device is bound to the taxi_mac driver; the PS GEM (board RJ45) is not.
+# --------------------------------------------------------------------------
+detect_ifaces() {
+	found=""
+	for d in /sys/class/net/*; do
+		[ -e "$d/device/driver" ] || continue
+		drv=$(basename "$(readlink "$d/device/driver")")
+		case "$drv" in
+			taxi_mac|taxi-mac) found="$found $(basename "$d")" ;;
+		esac
+	done
+	echo "$found" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' '
+}
+
+hdr "Taxi port discovery"
+if [ -z "$IFACES" ]; then
+	t=0
+	while :; do
+		IFACES=$(detect_ifaces)
+		n=$(echo "$IFACES" | wc -w)
+		[ "$n" -ge "$EXPECTED_PORTS" ] && break
+		[ "$t" -ge "$LINK_WAIT" ] && break
+		sleep 1; t=$((t + 1))
+	done
+fi
+NPORTS=$(echo "$IFACES" | wc -w)
+if [ "$NPORTS" -eq 0 ]; then
+	log "no network interface is bound to the taxi_mac driver"
+	log "  loaded? : $(grep -c '^taxi_mac ' /proc/modules 2>/dev/null) (lsmod count)"
+	dmesg 2>/dev/null | grep -i 'taxi' | tail -n 10
+	log "VERDICT: FAIL"
+	exit 1
+fi
+log "taxi_mac ports ($NPORTS):$( for i in $IFACES; do printf ' %s' "$i"; done )"
+[ "$NPORTS" -lt "$EXPECTED_PORTS" ] && log "WARNING: expected $EXPECTED_PORTS ports"
+
+# --------------------------------------------------------------------------
+# Bring every port up and wait for carrier (all of them with --all-ports,
+# otherwise until at least one has a link or the timeout expires).
+# --------------------------------------------------------------------------
+for i in $IFACES; do ip link set dev "$i" up 2>/dev/null; done
+
+carrier() { [ "$(cat /sys/class/net/$1/carrier 2>/dev/null)" = "1" ]; }
+
+t=0
+while :; do
+	up=0; down=0
+	for i in $IFACES; do if carrier "$i"; then up=$((up + 1)); else down=$((down + 1)); fi; done
+	if [ "$ALL_PORTS" = 1 ]; then [ "$down" -eq 0 ] && break; else [ "$up" -gt 0 ] && break; fi
+	[ "$t" -ge "$LINK_WAIT" ] && break
+	sleep 1; t=$((t + 1))
+done
+
+# --------------------------------------------------------------------------
+# Per-port link report
+# --------------------------------------------------------------------------
+hdr "Link status"
+LINKED=""
+for i in $IFACES; do
+	mac=$(cat /sys/class/net/$i/address 2>/dev/null)
+	oper=$(cat /sys/class/net/$i/operstate 2>/dev/null)
+	if carrier "$i"; then
+		spd=$(ethtool "$i" 2>/dev/null | awk -F': ' '/Speed:/{s=$2} /Duplex:/{d=$2} END{printf "%s %s", s, d}')
+		log "$i  $mac  link UP    $spd  (operstate $oper)"
+		LINKED="$LINKED $i"
+	else
+		log "$i  $mac  link DOWN  (operstate $oper)"
+	fi
+done
+
+# --------------------------------------------------------------------------
+# DHCP + gateway ping on every port with carrier
+# --------------------------------------------------------------------------
+ipv4_of() { ip -4 -o addr show dev "$1" scope global 2>/dev/null | awk '{print $4; exit}'; }
+gw_of()   { ip -4 route show dev "$1" 2>/dev/null | awk '$1=="default"{print $3; exit}'; }
+
+wait_lease() {
+	# systemd-networkd (80-wired.network, DHCP=yes on every wired port) is
+	# the EDF image's DHCP client; just wait for the address to appear.
+	t=0
+	while [ "$t" -lt "$DHCP_WAIT" ]; do
+		[ -n "$(ipv4_of "$1")" ] && return 0
+		sleep 1; t=$((t + 1))
+	done
+	# Fallback one-shot clients for images without networkd.
+	if command -v dhcpcd >/dev/null 2>&1; then
+		dhcpcd -1 -t "$DHCP_WAIT" "$1" >/dev/null 2>&1
+	elif command -v udhcpc >/dev/null 2>&1; then
+		udhcpc -i "$1" -n -q -t 5 -T 3 >/dev/null 2>&1
+	fi
+	[ -n "$(ipv4_of "$1")" ]
+}
+
+PASSED=""
+FAILED=""
+for i in $LINKED; do
+	hdr "DHCP + gateway ping on $i"
+	if ! wait_lease "$i"; then
+		log "$i: no DHCP lease within ${DHCP_WAIT}s"
+		FAILED="$FAILED $i"
+		continue
+	fi
+	addr=$(ipv4_of "$i")
+	gw=$(gw_of "$i")
+	if [ -z "$gw" ]; then
+		# No default route through this port (only one port gets the default
+		# route at a time when several have leases): ping the lease's router
+		# from networkd's lease file if we can find it, else the .1 host.
+		gw=$(sed -n 's/^ROUTER=//p' /run/systemd/netif/leases/"$(cat /sys/class/net/$i/ifindex)" 2>/dev/null | head -n1)
+		[ -z "$gw" ] && gw=$(echo "$addr" | awk -F'[./]' '{printf "%s.%s.%s.1", $1, $2, $3}')
+	fi
+	log "$i: address $addr  gateway $gw"
+	out=$(ping -I "$i" -c "$PING_COUNT" -W 2 "$gw" 2>&1)
+	rcv=$(echo "$out" | sed -n 's/.* \([0-9]*\) \(packets \)\{0,1\}received.*/\1/p' | head -n1)
+	[ -z "$rcv" ] && rcv=0
+	echo "$out" | tail -n 2
+	if [ "$rcv" -ge "$PING_MIN" ]; then
+		log "$i: ping $rcv/$PING_COUNT replies -> OK"
+		PASSED="$PASSED $i"
+	else
+		log "$i: ping $rcv/$PING_COUNT replies -> FAIL"
+		FAILED="$FAILED $i"
+	fi
+done
+
+# --------------------------------------------------------------------------
+# Driver counters (the MAC register file: good/bad/overflow frame counts)
+# --------------------------------------------------------------------------
+for i in $IFACES; do
+	hdr "ethtool -S $i"
+	ethtool -S "$i" 2>&1 || log "(driver exposes no ethtool statistics)"
+done
+
+# --------------------------------------------------------------------------
+# Verdict
+# --------------------------------------------------------------------------
+hdr "Summary"
+nlinked=$(echo "$LINKED" | wc -w)
+npassed=$(echo "$PASSED" | wc -w)
+log "ports: $NPORTS  with link: $nlinked  DHCP+ping OK:$( [ -n "$PASSED" ] && printf '%s' "$PASSED" || printf ' none' )$( [ -n "$FAILED" ] && printf '  failed:%s' "$FAILED" )"
+rc=0
+if [ "$npassed" -lt 1 ]; then
+	log "no Taxi port completed carrier + DHCP + gateway ping"
+	rc=1
+fi
+if [ "$ALL_PORTS" = 1 ] && { [ "$nlinked" -lt "$EXPECTED_PORTS" ] || [ "$NPORTS" -lt "$EXPECTED_PORTS" ]; }; then
+	log "--all-ports: only $nlinked of $EXPECTED_PORTS ports have carrier"
+	rc=1
+fi
+if [ "$rc" -eq 0 ]; then log "VERDICT: PASS"; else log "VERDICT: FAIL"; fi
+exit $rc

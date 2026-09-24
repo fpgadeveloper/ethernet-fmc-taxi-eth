@@ -1,0 +1,45 @@
+{
+  "bd_name": "taxieth",
+  "prj_name": "ethernet-fmc-taxi-eth",
+  "groups": [
+    { "label": "fpga", "name": "FPGA" },
+    { "label": "zu", "name": "Zynq UltraScale+" }
+  ],
+  "designs": [
+    {
+      "publish": true,
+      "label": "kcu105",
+      "board": "KCU105",
+      "link": "https://www.xilinx.com/kcu105",
+      "url": "xilinx.com",
+      "boardname": "kcu105",
+      "bdscript": "mb-us",
+      "lanes": [0, 1, 2, 3],
+      "connector": "HPC",
+      "group": "fpga",
+      "baremetal": true,
+      "petalinux": false,
+      "yocto": false,
+      "license": true,
+      "ip_license": false
+    },
+    {
+      "publish": true,
+      "label": "zcu104",
+      "board": "ZCU104",
+      "link": "https://www.xilinx.com/zcu104",
+      "url": "xilinx.com",
+      "boardname": "zcu104",
+      "bdscript": "zynqmp",
+      "lanes": [0, 1, 2, 3],
+      "connector": "LPC",
+      "group": "zu",
+      "portcfg": "ports-0123",
+      "baremetal": true,
+      "petalinux": false,
+      "yocto": true,
+      "license": false,
+      "ip_license": false
+    }
+  ]
+}

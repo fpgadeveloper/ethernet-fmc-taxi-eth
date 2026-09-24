@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026, Opsero Electronic Design Inc.  All rights reserved.
+
+/*
+ * PS GEM3 (the ZCU104's own RJ45): the SDT flow does not describe the
+ * board-level TI DP83867 PHY, so Linux would fall back to the Generic PHY
+ * driver and the RGMII clock delays would never be programmed - the link
+ * negotiates 1G but passes no packets. The PHY address (0xc) and the delay
+ * properties are those of the official zynqmp-zcu104-revA/revC.dts (the
+ * reset-gpios via the I2C TCA6416 expander is omitted: the SDT flow does not
+ * describe the board's I2C tree and the PHY comes out of reset by strap).
+ *
+ * The fixed MAC replaces the random one the SDT flow leaves us with; it is
+ * the bench address allocated to the ZCU104 board (one per board model),
+ * so the board is reachable over SSH at a known address for autonomous
+ * testing. The four Ethernet FMC ports use the next four addresses (see the
+ * port-config overlay).
+ */
+&gem3 {
+	phy-mode = "rgmii-id";
+	phy-handle = <&phy0>;
+	local-mac-address = [00 0a 35 06 21 04];
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		phy0: ethernet-phy@c {
+			#phy-cells = <1>;
+			compatible = "ethernet-phy-id2000.a231";
+			reg = <0xc>;
+			ti,rx-internal-delay = <0x8>;
+			ti,tx-internal-delay = <0xa>;
+			ti,fifo-depth = <0x1>;
+			ti,dp83867-rxctrl-strap-quirk;
+		};
+	};
+};

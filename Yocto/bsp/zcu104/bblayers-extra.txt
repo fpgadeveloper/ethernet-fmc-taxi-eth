@@ -1,0 +1,5 @@
+# Extra Yocto meta-layers for this bsp, added to bblayers.conf by
+# Yocto/scripts/configure-build.sh. Paths are relative to the repo root.
+# meta-taxi-eth is shared by every board: it builds the taxi-mac kernel
+# module from Linux/taxi-mac and ships the taxi-eth-test self-test app.
+Yocto/common/meta-taxi-eth
